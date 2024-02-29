@@ -1,6 +1,6 @@
 ---
 title: "Lab 5: Sea-Level Rise"
-author: "<Your Name (NetID)>"
+author: "<Leanh Nguyen (Ln14)>"
 jupyter: julia-1.10
 date: 2024-02-16
 
@@ -9,18 +9,18 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 bibliography: references.bib
@@ -60,3 +60,351 @@ Plots.default(; margin=5Plots.mm)
 using Revise
 using HouseElevation
 ```
+
+
+# Building the model
+
+## House
+
+::: {.callout-important}
+We will consider a single house, and will ignore uncertainty in the depth-damage function or other house parameters
+:::
+
+- Neglect uncertainty in depth-damage function
+- Consider a single building
+- We're going to put all relevant information into a `House` object:
+    - Depth-damage function
+    - Area
+    - Cost (USD)
+    - Elevation relative to gauge
+    - Metadata
+
+We can create a `House` as follows -- note that we're using a `let...end` block to create the `House` object.
+
+```{julia}
+#| output: false
+house = let
+    haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+    desc = "Gift Shop, structure" 
+    row = @rsubset(haz_fl_dept, :Description == desc)[1, :] # select the row I want
+    area = 795u"ft^2" # <1>
+    height_above_gauge = 6u"ft" #can only be a whole number
+    House(
+        row;
+        area=area,
+        height_above_gauge=height_above_gauge,
+        value_usd=221_600, # <2>
+    )
+end
+```
+
+1. Area was obtained from Google Earth's measurement tools
+2. From Google Earth, I calculated/estimated my target structure's area (795 sq ft). Then, I found a structure near my target structure on zillow that had a similar area (750 sq ft). Thus, I decided to use this as the house structure value. https://www.zillow.com/homedetails/101-21st-St-STE-214-Galveston-TX-77550/2132158257_zpid/ 
+
+```{julia}
+#| code-fold: true
+let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft")) # <1>
+    damages = house.ddf.(depths) .* house.value_usd ./ 1000
+    scatter(
+        depths,
+        damages;
+        xlabel="Flood Depth",
+        ylabel="Damage (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+1. Depth-damage curve obtained from data from data/haz_fl_dept.csv. We were given a range of depth to consider. Then, we use the `House` object to calculate the damage to the house for a given flood depth. We then convert the damage to dollars by multiplying the fraction (given by our depth-damage function) by the value of the house. 
+
+Use the `House` object to calculate the cost of raising the house to a given elevation. Use the `elevation_cost` function 
+
+```{julia}
+elevation_cost(house, 6u"ft")
+```
+
+Plot This
+
+```{julia}
+let
+    elevations = 0u"ft":0.25u"ft":14u"ft"
+    costs = [elevation_cost(house, eᵢ) for eᵢ in elevations]
+    scatter(
+        elevations,
+        costs ./ 1_000;
+        xlabel="Elevation",
+        ylabel="Cost (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+
+## Sea-level rise
+
+::: {.callout-important}
+We will sample many different scenarios of sea-level rise
+:::
+
+We're modeling sea-level rise following the approach of @oddo_coastal:2017.
+Essentially, we use five parameters: $a$, $b$, $c$, $t^*$, and $c^*$.
+The local sea-level in year $t$ is given by equation 6 of @oddo_coastal:2017:
+
+$$
+\mathrm{SLR}= a + b(t - 2000) + c (t - 2000)^2 + c^* \, \mathbb{I} (t > t^*) (t - t^*)
+$$
+
+The authors note:
+
+> In this model, the parameters $a$, $b$, and $c$ represent the reasonably well-characterized process of thermosteric expansion as a second-order polynomial. It also accounts for more poorly understood processes, including potential abrupt sealevel rise consistent with sudden changes in ice flow dynamics.Here, $c^*$ represents an increase in the rate of sea-level rise that takes place at some uncertain time, $t^*$, in the future.
+
+This is, of course, a highly simplified model.
+However, the parameters can be calibrated to match historical sea-level rise (i.e., throwing out any parameter values that don't match the historical record) and use a statistical inversion method to estimate the parameters.
+One could also calibrate the parameters to match other, more complex, physics-based models.
+We'll use Monte Carlo simulations from @oddo_coastal:2017, available on [GitHub](https://github.com/pcoddo/VanDantzig/blob/master/Model_Versions/Uncertainty_SLR/SLR_Module/Rejection_Sampling/beta/output/array_beta.txt).
+These were actually calibrated for the Netherlands, but we'll pretend that sea-level rise in your location matches (which -- as we know -- it doesn't).
+
+```{julia}
+#| output: false
+slr_scenarios = let
+    df = CSV.read("data/slr_oddo.csv", DataFrame)
+    [Oddo17SLR(a, b, c, tstar, cstar) for (a, b, c, tstar, cstar) in eachrow(df)]
+end
+println("There are $(length(slr_scenarios)) parameter sets")
+```
+
+Plot these scenarios to get a sense of the range of sea-level rise we might expect.
+
+```{julia}
+let
+    years = 1900:2150
+    p = plot(;
+        xlabel="Year",
+        ylabel="Mean sea-level (ft)\nwith respect to the year 2000",
+        label="Oddo et al. (2017)",
+        legend=false
+    )
+    for s in rand(slr_scenarios, 250)
+        plot!(p, years, s.(years); color=:lightgrey, alpha=0.5, linewidth=0.5)
+    end
+    p
+end
+```
+
+Key insight from this plot: uncertainty in future sea level increases over time
+
+## Storm surge
+
+::: {.callout-important}
+We will consider parametric uncertainty in the storm surge
+:::
+
+The next component of the model is the storm surge (i.e., the height of the flood above mean sea-level).
+Model the water level _at the gauge_ as the sum of the local sea-level and the storm surge.
+Then model the water level _at the house_ as the water level at the gauge minus the elevation of the house above the gauge.
+
+Consider parametric uncertainty in the storm surge.
+From lab 3, you should have a `GeneralizedExtremeValue` distribution for the storm surge.
+We can then sample parameters from a range centered on this distribution.
+For example, in the example for lab 3 we had `GeneralizedExtremeValue(5, 1.5, 0.1)`.
+We can use this function to create a distribution for the storm surge.
+
+```{julia}
+function draw_surge_distribution()
+    μ = rand(Normal(5, 1))
+    σ = rand(Exponential(1.5))
+    ξ = rand(Normal(0.1, 0.05))
+    GeneralizedExtremeValue(μ, σ, ξ)
+end
+```
+
+Storm Surge Distribution: I've chosen to model the storm surge distribution using the Generalized Extreme Value (GEV) distribution. The GEV distribution is commonly used to model extreme events (e.g., storm surges) because it can capture various shapes of distributions. The parameters μ, σ, and ξ represent the location, scale, and shape of the distribution. I've chosen to sample these parameters randomly to introduce variability in the storm surge distribution.
+
+We can then call this function many times to get many different distributions for the storm surge.
+
+```julia
+[draw_surge_distribution() for _ in 1:1000]
+```
+
+::: {.callout-important}
+## Important
+
+This is NOT statistical estimation.
+We are not saying anything at all about whether these parameters are consistent with observations.
+In fact, even when parameters are uncertain, sampling around a point estimate in this manner usually produces lots of parameter values that are highly implausible.
+Here, we are just exploring the implications of different parameter values.
+Building a better model for storm surge is a great idea for your final project!
+:::
+
+## Discount rate
+
+::: {.callout-important}
+We will consider parametric uncertainty in the discount rate.
+:::
+
+The discount rate is an important economic parameter in our NPV analysis.
+There are elements of discounting that are perhaps not random (e.g., how much do you value the future versus the present?) while there are other elements that are very much random (what is the opportunity cost of spending money now?)
+Model this by treating the discount rate as a random variable, but more sophisticated analyses are possible.
+
+```{julia}
+#| output: false
+function draw_discount_rate()
+    return rand(Normal(0.04, 0.02))
+end
+```
+
+Note that we are now defining the discount rate as a proportion (from 0 to 1) rather than a percentage (from 0 to 100).
+
+Discount Rate: I've chosen to model the discount rate using a normal distribution with a mean of 0.04 (4%) and a standard deviation of 0.02 (2%). This reflects typical values for discount rates used in financial modeling. By sampling from a normal distribution, I can introduce variability in the discount rate, allowing for different discount rates to be considered in the analysis.
+
+These modeling choices aim to capture the uncertainty and variability inherent in storm surge events and discount rates, which are important factors in decision-making processes related to risk management and financial plans.
+
+## Running a simulation
+In the notation we've seen in class, we have a system model $f$ that takes in a state of the world $\mathbf{s}$, an action $a$, and outputs some metric or metrics.
+I've reproduced this in our model, adding one extra piece: a `ModelParams` object that contains all the parameters of the model that *don't change from one simulation to the next.*
+
+In our model, the `ModelParams` are the house characteristics (area, value, and depth-damage curve) and the years we're considering.
+You should consider different time horizons!
+
+```{julia}
+#| output: false
+p = ModelParams(
+    house=house,
+    years=2024:2083
+)
+```
+
+The next step is to create an object to hold our state of the world (SOW).
+We can create one like this. 
+In the next step, we'll want to sample a large ensemble of SOWs.
+
+```{julia}
+#| output: false
+sow = SOW(
+    rand(slr_scenarios),
+    draw_surge_distribution(),
+    draw_discount_rate()
+)
+```
+
+Last, we need to define our action.
+For now, our action is very simple: we're going to raise the house to a fixed elevation.
+However, in the future we might have a more complex action (e.g., when the sea level exceeds some threshold $t1$, raise the house by some fixed amount $t2$, which has two parameters).
+We define our action as follows:
+
+```{julia}
+#| output: false
+a = Action(10.0u"ft")
+```
+
+Finally, we have a function to run the simulation.
+This function takes in the model parameters, the state of the world, and the action, and returns the NPV of the action.
+Please have a look at [`run_sim.jl`](HouseElevation/src/run_sim.jl) to see how this is implemented!
+
+```{julia}
+res = run_sim(a, sow, p)
+```
+
+# Exploratory modeling
+
+Now that you've figured out how this model works, it's your turn to conduct some exploratory modeling.
+In [`template.qmd`](./template.qmd), I've provided only the code required to load packages.
+
+## Apply the model to your site
+
+1. Build your own house object, based on the house you've been using (or you can switch if you'd like)
+    a. Briefly explain where you got the area, value, and depth-damage curve from
+    a. Plot the depth-damage curve
+    a. Plot the cost of raising the house to different elevations from 0 to 14 ft
+2. Read in the sea-level rise data
+3. Modify my code to create a function to draw samples of storm surge and the discount rate. Explain your modeling choices!
+4. Define an illustrative action, SOW, and model parameters, and run a simulation.
+
+## Large ensemble
+
+Now that you've got the model working for your site, you should run a large ensemble of simulations (explain how you interpret "large").
+
+1. Sample many SOWs (see below)
+1. Sample a range of actions. You can do this randomly, or you can look at just a couple of actions (e.g., 0, 3, 6, 9, 12 ft) -- explain your choice.
+1. Run the simulations for each SOW and action. You can use a for loop for this.
+1. Create a DataFrame of your key inputs and results (see below)
+
+Here's how you can create a few SOWs and actions and run the simulations for each:
+
+```{julia}
+num_sows = 10  # Number of SOWs to sample <1>
+sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:num_sows] # for 200 SOWs <2>
+actions = [Action(i*u"ft") for i in 0:3:12] # <3>
+results = [(sow, action, run_sim(action, sow, p)) for sow in sows, action in actions] # <4>
+```
+
+1. I defined the variable num_sows to specify the number of SOWs I want to sample. I can adjust this number based on the level of uncertainty and variability I want to capture in my simulations.
+2. I create a new SOW object for each iteration, sampling parameters for sea-level rise, storm surge, and discount rate using the provided functions (rand(slr_scenarios), draw_surge_distribution(), and draw_discount_rate()).
+3. To sample a range of actions, I chose to select a few specific actions of interest, generating a range of actions from 0 to 12 feet with a step size of 3 feet:
+4. Once I have my SOWs and actions, I run simulations for each combination of SOW and action using a nested loop. 
+
+10 SOWs - 4.35 seconds
+100 SOWs - 32.97 seconds
+200 SOWs - 1 minute 34 seconds
+1000 SOWs - > 8 minutes
+
+Here's how you can create a dataframe of your results.
+Each row corresponds to one simulation, and the columns are the inputs and outputs of the simulation.
+
+```{julia}
+df = DataFrame( # <1>
+    npv=vec([res[3] for res in results]),  # Extract NPV results for each simulation <2> <3> <4>
+    Δh_ft=vec([res[2].Δh_ft for res in results]),  # Extract action height for each simulation
+    slr_a=vec([res[1].slr.a for res in results]),  # Extract SLR parameter 'a' for each SOW
+    slr_b=vec([res[1].slr.b for res in results]),
+    slr_c=vec([res[1].slr.c for res in results]),
+    slr_tstar=vec([res[1].slr.tstar for res in results]),
+    slr_cstar=vec([res[1].slr.cstar for res in results]),
+    surge_μ=vec([res[1].surge_dist.μ for res in results]),
+    surge_σ=vec([res[1].surge_dist.σ for res in results]),
+    surge_ξ=vec([res[1].surge_dist.ξ for res in results]),
+    discount_rate=vec([res[1].discount_rate for res in results]),
+)
+show(df, allrows=true) # to see all table but uncomment if large SOW (will crash the program)
+```
+
+1. Create a DataFrame of Key Inputs and Results: store the inputs and outputs in a DataFrame facilitates analysis and visualization of the results, allowing for better decision-making.
+2. Adjustments for  DataFrame creation
+    - The previous version mixed SOW and action attributes in the DataFrame creation, which caused errors in my outputs.
+    - Here, I  separate the SOW and action attributes for each simulation result.
+    - Since I have a list of tuples in results, where each tuple contains a SOW, an action, and the simulation result (NPV), I  extracted these components  for each simulation run. 
+    - This code  associates each row in the DataFrame with a single simulation run, ensuring that the dimensions match across all columns. 
+    - Each res in results is unpacked to extract the simulation result (NPV), the action taken (height increase Δh_ft), and various SOW parameters. 
+3. Issue: A function or operation used to generate the column data inadvertently returns a multi-dimensional array. 
+    - So I used vec(x) to make sure theese are converted to a 1D array. As I do not know which line is causing the issue, I applied it to all of DataFrame
+4. res[1]  contains information about the SOW used in that particular simulation. This would include parameters like sea-level rise scenarios (slr), storm surge distribution (surge_dist), and the discount rate used in the economic analysis. 
+    - res[2]  contains information about the action taken in the simulation (elevating the house).
+    - res[3] contains the result of the simulation given the specific SOW and action. Here, it represents the Net Present Value (NPV) of taking a specific action under a certain SOW. 
+
+## Analysis
+
+Now, analyze your results.
+You can use scatterplots and other visualizations, or any other statistical analyses that you think may be helpful.
+Remember that the goal is to understand how different parameter values affect the success or failure of different actions.
+
+Some questions to consider:
+
+- When do you get the best results? - When do you get the worst results?
+    - Negative NPVs indicate that the costs outweigh the benefits when discounted back to the present value.
+    - In all the cases, for my particular structure and its given characteristics, all options result in a negative NPV, suggesting that elevating the house may not be a good economic decision for the owner as well as elevating the house may be a worse economic decision for the owner as well. However, the 0 ft (no elevation decision) and the 12 ft (elevate 12 feet) actions have resulted in the lowest negative NPV (~ -1). This is much better than the 6 ft and 9 ft actions, which contains multiple instances of large negative NPVs (4 or 5 times)
+- What are the most important parameters?
+    -   Δh_ft: This  represent a change in height or elevation of a house. As the action variable is how the house is raised and impacts the NPV, Δh_ft is one of the most important parameter for this project, impacting upfront costs and benefits from elevation.
+    - slr_a, slr_b, slr_c: These columns represent parameters or coefficients related to sea level rise (SLR), which was given by the dataset. 
+    - slr_tstar, slr_cstar: These could denote specific threshold or critical values associated with the sea level rise model, which can indicate significant points of change or impact in the projections.
+    - surge_μ, surge_σ, surge_ξ: These columns relate to the storm surge modeling, with μ (mean), σ (standard deviation), and ξ (shape parameter or the distribution tail) describing the statistical characteristics of storm surge events, suggesting that the analysis includes considerations of extreme weather events.
+    - Different discount rates can significantly affect the NPV outcome, reflecting the sensitivity of the investment's value to the cost of capital or opportunity cost.
+- If you had unlimited computing power, would you run more simulations? How many?
+    - If I had unlimited computing power, I would run more simulations. Specifically, I would run thousands more. As you can see when I run my SOWs, actions, and results, it takes my computer half a minute to load 100 SOWs and it exponentially increases as I use more loads. If possible, it would be good to run more simulations (e.g., 1000s) to identify and reduce uncertainties with the NPV calculations and results. However, I am limited by computing power. On the other hand, in certain situations, running more simulations may be unncecessary or inappropriate for something that is inherently/deeply uncertain (i.e., discount rates and depth-damage curves) so utilizing different models might be better. 
+- What are the implications of your results for decision-making?
+    - This kind of analysis is crucial for long-term planning in sectors like coastal infrastructure development, where investments must consider the changing environment and associated financial risks. The use of NPV and discount rates ties the environmental projections to their economic implications, helping stakeholders make informed decisions based on both current and future expectations. However, it also shows how deep uncertainties (like depth-damage curves and discount rates) can have large impacts on the data and must be analyzed for accurate NPV estimations of decisions. However, including these uncertainties is complicated and requires the use of more simulations or the use of different models. 
+    - All in all, if the results generated here were given to a policymaker, they would not fully help the policymaker make informed decisions due to the complex nature of the code as well as the uncertainties deeply rooted in the code, which may make underestimation and overestimation of damages and benefits from a given action or policy. 

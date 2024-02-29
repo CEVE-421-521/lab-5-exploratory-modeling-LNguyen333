@@ -1,6 +1,6 @@
 ---
 title: "Lab 5: Sea-Level Rise"
-author: "CEVE 421/521"
+author: "Leanh Nguyen CEVE 421/521"
 jupyter: julia-1.10
 date: 2024-02-16
 week: 6
@@ -11,18 +11,18 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
-        number-sections: true
-        code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 bibliography: references.bib
@@ -300,7 +300,7 @@ p = ModelParams(
 ```
 
 The next step is to create an object to hold our state of the world (SOW).
-We can create one like this.
+We can create one like this. 
 In the next step, we'll want to sample a large ensemble of SOWs.
 
 ```{julia}
